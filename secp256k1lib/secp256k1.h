@@ -103,6 +103,16 @@ namespace secp256k1 {
 			}
 		}
 
+		bool operator<(const uint256& x) const
+		{
+			return this->cmp(x) < 0;
+		}
+
+		bool operator>(const uint256& x) const
+		{
+			return this->cmp(x) > 0;
+		}
+		
 		bool operator==(const uint256 &x) const
 		{
 			for(int i = 0; i < 8; i++) {
@@ -262,6 +272,41 @@ namespace secp256k1 {
 		}
 
 		std::string toString(int base = 16);
+
+		std::string toString(int base = 16) const {
+
+			if (base != 16 && base != 10) {
+				return "Unsupported base. Only base 10 and 16 are supported.";
+			}
+
+			if (isZero()) {
+				return "0";
+			}
+
+			std::string result;
+			uint256 temp = *this;
+
+			if (base == 16) {
+				// Convert to hexadecimal
+				for (int i = 7; i >= 0; i--) {
+					char buffer[9]; // 8 hex digits + null terminator
+					snprintf(buffer, sizeof(buffer), "%08x", temp.v[i]);
+					result += buffer;
+				}
+
+				// Remove leading zeros
+				result.erase(0, result.find_first_not_of('0'));
+			}
+			else if (base == 10) {
+				// Convert to decimal
+				while (!temp.isZero()) {
+					uint32_t remainder = temp.mod(10).toInt32();
+					result.insert(result.begin(), '0' + remainder);
+					temp = temp.div(10);
+				}
+			}
+			return result;
+		}
 
         uint64_t toUint64()
         {
