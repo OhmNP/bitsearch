@@ -237,12 +237,23 @@ uint32_t CudaKeySearchDevice::getPrivateKeyOffset(int thread, int block,
 }
 
 void CudaKeySearchDevice::getResultsInternal() {
-  int count = _resultList.size();
-
-  float kernelMs = 0;
-  // Step 3: GPU Kernel Timing - Ensure kernel finished
+  // Step 1: Measure CPU wait time (blocking on GPU completion)
+  auto startWait = std::chrono::high_resolution_clock::now();
   cudaCall(cudaEventSynchronize(_stopEvent));
+  auto endWait = std::chrono::high_resolution_clock::now();
+  double cpuWaitMs =
+      std::chrono::duration<double, std::milli>(endWait - startWait).count();
+
+  // Step 2: Measure kernel time (GPU) - must be after synchronize
+  float kernelMs = 0;
   cudaCall(cudaEventElapsedTime(&kernelMs, _startEvent, _stopEvent));
+
+  // Step 3: Measure zero-copy read cost (CPU consuming GPU data)
+  auto startD2H = std::chrono::high_resolution_clock::now();
+  int count = _resultList.size();
+  auto endD2H = std::chrono::high_resolution_clock::now();
+  double d2hMs =
+      std::chrono::duration<double, std::milli>(endD2H - startD2H).count();
 
   TelemetryData t;
   t.kernelTimeMs = kernelMs;
@@ -251,6 +262,9 @@ void CudaKeySearchDevice::getResultsInternal() {
   t.cpuSetupTimeMs = _cpuSetupTime;
   t.cpuValidationTimeMs = 0;
   t.matches = 0;
+  t.gpuIdleTimeMs = 0; // Removed
+  t.cpuWaitTimeMs = cpuWaitMs;
+  t.deviceToHostMs = d2hMs;
 
   // Step 4: Hard Assertions
   if (t.keysSearched == 0) {
@@ -270,19 +284,25 @@ void CudaKeySearchDevice::getResultsInternal() {
   if (count > 0) {
     unsigned char *ptr = new unsigned char[count * sizeof(CudaDeviceResult)];
 
-    cudaCall(cudaEventRecord(_memStartEvent, _stream));
+    cudaCall(cudaEventRecord(_memStartEvent,
+                             _stream)); // Keep for timeline completeness?
+
+    auto startPayload = std::chrono::high_resolution_clock::now();
     _resultList.read(ptr, count);
+    auto endPayload = std::chrono::high_resolution_clock::now();
+
     cudaCall(cudaEventRecord(_memStopEvent, _stream));
 
-    auto startWait = std::chrono::high_resolution_clock::now();
-    cudaCall(cudaEventSynchronize(_memStopEvent));
-    auto endWait = std::chrono::high_resolution_clock::now();
+    // Mapped memory read is sync on CPU, so we measure it directly
+    double payloadMs =
+        std::chrono::duration<double, std::milli>(endPayload - startPayload)
+            .count();
+    t.deviceToHostMs += payloadMs;
 
-    t.cpuWaitTimeMs =
-        std::chrono::duration<double, std::milli>(endWait - startWait).count();
-
-    cudaCall(cudaEventElapsedTime(&memMs, _memStartEvent, _memStopEvent));
-    t.deviceToHostMs = memMs;
+    // CPU Idle/Wait was already captured in Step 2.
+    // cpuWaitTimeMs here was for memStopEvent previously, which is redundant if
+    // we sync'd earlier. However, read() *might* wait if we didn't sync
+    // properly? We did.
 
     double transferBytes = count * sizeof(CudaDeviceResult);
     if (memMs > 0) {

@@ -162,9 +162,7 @@ void statusCallback(KeySearchStatus info) {
             << "\"batch\": " << info.telemetry.batchId << ", "
             << "\"kernel_ms\": " << info.telemetry.kernelTimeMs << ", "
             << "\"d2h_ms\": " << info.telemetry.deviceToHostMs << ", "
-            << "\"cpu_scalar_gen_ms\": " << info.telemetry.cpuSetupTimeMs
-            << ", "
-            << "\"queue_wait_ms\": " << info.telemetry.cpuWaitTimeMs << ", "
+            << "\"cpu_wait_gpu_ms\": " << info.telemetry.cpuWaitTimeMs << ", "
             << "\"cpu_vanity_ms\": " << info.telemetry.cpuValidationTimeMs
             << ", "
             << "\"matches\": " << info.telemetry.matches << ", "

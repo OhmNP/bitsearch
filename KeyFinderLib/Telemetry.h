@@ -17,6 +17,7 @@ struct TelemetryData {
   uint64_t matches;
   double bandwidthGBs;
   double occupancy;
+  double gpuIdleTimeMs;
 
   TelemetryData() = default;
 };
