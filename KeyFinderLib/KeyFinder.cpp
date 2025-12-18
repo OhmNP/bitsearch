@@ -5,8 +5,8 @@
 #include "KeyFinder.h"
 #include "util.h"
 
-
 #include "Logger.h"
+// Force rebuild for Telemetry linkage
 
 void KeyFinder::defaultResultCallback(KeySearchResult result) {
   // Do nothing
@@ -195,6 +195,8 @@ void KeyFinder::run() {
       info.deviceName = _device->getDeviceName();
       info.targets = _targets.size();
       info.nextKey = getNextKey();
+      info.nextKey = getNextKey();
+      // printf("KeyFinder reading Telemetry: %p\n", &Telemetry::getInstance());
       info.telemetry = Telemetry::getInstance().getLast();
 
       _statusCallback(info);

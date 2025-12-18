@@ -162,9 +162,15 @@ void statusCallback(KeySearchStatus info) {
             << "\"batch\": " << info.telemetry.batchId << ", "
             << "\"kernel_ms\": " << info.telemetry.kernelTimeMs << ", "
             << "\"d2h_ms\": " << info.telemetry.deviceToHostMs << ", "
+            << "\"cpu_scalar_gen_ms\": " << info.telemetry.cpuSetupTimeMs
+            << ", "
+            << "\"queue_wait_ms\": " << info.telemetry.cpuWaitTimeMs << ", "
+            << "\"cpu_vanity_ms\": " << info.telemetry.cpuValidationTimeMs
+            << ", "
+            << "\"matches\": " << info.telemetry.matches << ", "
             << "\"keys_sec\": "
             << info.telemetry.keysSearched /
-                   (info.telemetry.totalTimeMs / 1000.0 + 1e-9) // approx
+                   (info.telemetry.kernelTimeMs / 1000.0 + 1e-9) // approx
             << "}}\n";
 
   if (_config.checkpointFile.length() > 0) {
@@ -726,6 +732,19 @@ int main(int argc, char **argv) {
   }
 
   run();
+
+  // Summary Report
+  double avgKeysSec, avgKernMs, avgWaitMs;
+  Telemetry::getInstance().getSummary(avgKeysSec, avgKernMs, avgWaitMs);
+
+  std::cout << "\n========================================\n";
+  std::cout << "          TELEMETRY SUMMARY             \n";
+  std::cout << "========================================\n";
+  std::cout << "Avg Keys/Sec:   " << util::formatThousands((uint64_t)avgKeysSec)
+            << "\n";
+  std::cout << "Avg Kernel Time:" << avgKernMs << " ms\n";
+  std::cout << "Avg Wait Time:  " << avgWaitMs << " ms\n";
+  std::cout << "========================================\n";
 
   return 0;
 }

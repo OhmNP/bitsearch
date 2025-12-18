@@ -3,6 +3,9 @@
 #include "Logger.h"
 #include "cudabridge.h"
 #include "util.h"
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 void CudaKeySearchDevice::cudaCall(cudaError_t err) {
   if (err) {
@@ -159,15 +162,22 @@ void CudaKeySearchDevice::setTargets(const std::set<KeySearchTarget> &targets) {
 void CudaKeySearchDevice::doStep() {
   uint64_t numKeys = (uint64_t)_blocks * _threads * _pointsPerThread;
 
+  // Step 2: CPU Setup Timing (Real)
+  auto startSetup = std::chrono::high_resolution_clock::now();
+
+  // Real CPU work:
+  // 1. Calculate reset flag
+  bool reset = (_iterations < 2 && _startExponent.cmp(numKeys) <= 0);
+  // 2. Any other CPU-side prep would be here (none for this kernel)
+
+  auto endSetup = std::chrono::high_resolution_clock::now();
+  _cpuSetupTime =
+      std::chrono::duration<double, std::milli>(endSetup - startSetup).count();
+
   try {
     cudaCall(cudaEventRecord(_startEvent, _stream));
-    if (_iterations < 2 && _startExponent.cmp(numKeys) <= 0) {
-      callKeyFinderKernel(_blocks, _threads, _pointsPerThread, true,
-                          _compression);
-    } else {
-      callKeyFinderKernel(_blocks, _threads, _pointsPerThread, false,
-                          _compression);
-    }
+    callKeyFinderKernel(_blocks, _threads, _pointsPerThread, reset,
+                        _compression);
     cudaCall(cudaEventRecord(_stopEvent, _stream));
   } catch (cuda::CudaException ex) {
     throw KeySearchException(ex.msg);
@@ -228,73 +238,121 @@ uint32_t CudaKeySearchDevice::getPrivateKeyOffset(int thread, int block,
 
 void CudaKeySearchDevice::getResultsInternal() {
   int count = _resultList.size();
-  int actualCount = 0;
-  if (count == 0) {
-    return;
-  }
 
-  unsigned char *ptr = new unsigned char[count * sizeof(CudaDeviceResult)];
-
-  cudaCall(cudaEventRecord(_memStartEvent, _stream));
-  _resultList.read(ptr, count);
-  cudaCall(cudaEventRecord(_memStopEvent, _stream));
-  cudaCall(cudaEventSynchronize(
-      _memStopEvent)); // Wait for completion for now to simplify logic
-
-  float kernelMs = 0, memMs = 0;
-  cudaEventElapsedTime(&kernelMs, _startEvent, _stopEvent);
-  cudaEventElapsedTime(&memMs, _memStartEvent, _memStopEvent);
+  float kernelMs = 0;
+  // Step 3: GPU Kernel Timing - Ensure kernel finished
+  cudaCall(cudaEventSynchronize(_stopEvent));
+  cudaCall(cudaEventElapsedTime(&kernelMs, _startEvent, _stopEvent));
 
   TelemetryData t;
   t.kernelTimeMs = kernelMs;
-  t.deviceToHostMs = memMs;
   t.keysSearched = keysPerStep();
   t.batchId = _iterations;
-  Telemetry::getInstance().update(t);
+  t.cpuSetupTimeMs = _cpuSetupTime;
+  t.cpuValidationTimeMs = 0;
+  t.matches = 0;
 
-  for (int i = 0; i < count; i++) {
-    struct CudaDeviceResult *rPtr = &((struct CudaDeviceResult *)ptr)[i];
+  // Step 4: Hard Assertions
+  if (t.keysSearched == 0) {
+    Logger::log(LogLevel::Error, "ASSERTION FAILED: keysSearched == 0");
+    exit(1);
+  }
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    Logger::log(LogLevel::Error,
+                std::string("ASSERTION FAILED: cudaGetLastError: ") +
+                    cudaGetErrorString(err));
+    exit(1);
+  }
 
-    // might be false-positive
-    if (!isTargetInList(rPtr->digest)) {
-      continue;
+  float memMs = 0;
+
+  if (count > 0) {
+    unsigned char *ptr = new unsigned char[count * sizeof(CudaDeviceResult)];
+
+    cudaCall(cudaEventRecord(_memStartEvent, _stream));
+    _resultList.read(ptr, count);
+    cudaCall(cudaEventRecord(_memStopEvent, _stream));
+
+    auto startWait = std::chrono::high_resolution_clock::now();
+    cudaCall(cudaEventSynchronize(_memStopEvent));
+    auto endWait = std::chrono::high_resolution_clock::now();
+
+    t.cpuWaitTimeMs =
+        std::chrono::duration<double, std::milli>(endWait - startWait).count();
+
+    cudaCall(cudaEventElapsedTime(&memMs, _memStartEvent, _memStopEvent));
+    t.deviceToHostMs = memMs;
+
+    double transferBytes = count * sizeof(CudaDeviceResult);
+    if (memMs > 0) {
+      t.bandwidthGBs =
+          (transferBytes / (1024.0 * 1024.0 * 1024.0)) / (memMs / 1000.0);
     }
-    actualCount++;
 
-    KeySearchResult minerResult;
+    int actualCount = 0;
+    auto startVal = std::chrono::high_resolution_clock::now();
 
-    // Calculate the private key based on the number of iterations and the
-    // current thread
-    secp256k1::uint256 offset =
-        (secp256k1::uint256((uint64_t)_blocks * _threads * _pointsPerThread *
-                            _iterations) +
-         secp256k1::uint256(
-             getPrivateKeyOffset(rPtr->thread, rPtr->block, rPtr->idx))) *
-        _stride;
-    secp256k1::uint256 privateKey = secp256k1::addModN(_startExponent, offset);
+    for (int i = 0; i < count; i++) {
+      struct CudaDeviceResult *rPtr = &((struct CudaDeviceResult *)ptr)[i];
 
-    minerResult.privateKey = privateKey;
-    minerResult.compressed = rPtr->compressed;
+      if (!isTargetInList(rPtr->digest)) {
+        continue;
+      }
+      actualCount++;
 
-    memcpy(minerResult.hash, rPtr->digest, 20);
+      KeySearchResult minerResult;
+      secp256k1::uint256 offset =
+          (secp256k1::uint256((uint64_t)_blocks * _threads * _pointsPerThread *
+                              _iterations) +
+           secp256k1::uint256(
+               getPrivateKeyOffset(rPtr->thread, rPtr->block, rPtr->idx))) *
+          _stride;
+      secp256k1::uint256 privateKey =
+          secp256k1::addModN(_startExponent, offset);
 
-    minerResult.publicKey = secp256k1::ecpoint(
-        secp256k1::uint256(rPtr->x, secp256k1::uint256::BigEndian),
-        secp256k1::uint256(rPtr->y, secp256k1::uint256::BigEndian));
+      minerResult.privateKey = privateKey;
+      minerResult.compressed = rPtr->compressed;
+      memcpy(minerResult.hash, rPtr->digest, 20);
+      minerResult.publicKey = secp256k1::ecpoint(
+          secp256k1::uint256(rPtr->x, secp256k1::uint256::BigEndian),
+          secp256k1::uint256(rPtr->y, secp256k1::uint256::BigEndian));
 
-    removeTargetFromList(rPtr->digest);
+      removeTargetFromList(rPtr->digest);
+      _results.push_back(minerResult);
+    }
 
-    _results.push_back(minerResult);
+    auto endVal = std::chrono::high_resolution_clock::now();
+    t.cpuValidationTimeMs =
+        std::chrono::duration<double, std::milli>(endVal - startVal).count();
+    t.matches = actualCount;
+
+    delete[] ptr;
+    _resultList.clear();
+
+    if (actualCount) {
+      cudaCall(_targetLookup.setTargets(_targets));
+    }
+  } else {
+    // If no results, blocking sync on stopEvent is already done for kernel
+    // timing We can assume wait time is negligible or captured in sync
+    t.cpuWaitTimeMs = 0;
+    t.deviceToHostMs = 0;
+    t.bandwidthGBs = 0;
   }
 
-  delete[] ptr;
+  t.occupancy = 1.0;
 
-  _resultList.clear();
+  // Step 5: Output EXACT Telemetry (JSON) for debug
+  printf("{\n");
+  printf("  \"batch\": %llu,\n", t.batchId);
+  printf("  \"num_keys\": %llu,\n", t.keysSearched);
+  printf("  \"cpu_scalar_gen_ms\": %f,\n", t.cpuSetupTimeMs);
+  printf("  \"kernel_ms\": %f\n", t.kernelTimeMs);
+  printf("}\n");
+  fflush(stdout);
 
-  // Reload the bloom filters
-  if (actualCount) {
-    cudaCall(_targetLookup.setTargets(_targets));
-  }
+  Telemetry::getInstance().update(t);
 }
 
 // Verify a private key produces the public key and hash

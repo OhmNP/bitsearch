@@ -42,6 +42,8 @@ private:
   cudaEvent_t _memStopEvent;
   cudaStream_t _stream;
 
+  double _cpuSetupTime;
+
   std::vector<KeySearchResult> _results;
 
   std::string _deviceName;
