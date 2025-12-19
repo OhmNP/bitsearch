@@ -38,7 +38,7 @@ export BUILD_CUDA
 TARGETS=dir_addressutil dir_cmdparse dir_cryptoutil dir_keyfinderlib dir_keyfinder dir_secp256k1lib dir_util dir_logger dir_addrgen
 
 ifeq ($(BUILD_CUDA),1)
-	TARGETS:=${TARGETS} dir_cudaKeySearchDevice dir_cudautil
+	TARGETS:=${TARGETS} dir_cudaKeySearchDevice dir_cudautil dir_ecdump
 endif
 
 
@@ -93,6 +93,9 @@ dir_logger:
 dir_addrgen:	dir_cmdparse dir_addressutil dir_secp256k1lib
 	make --directory AddrGen
 
+dir_ecdump:	dir_secp256k1lib dir_cudautil dir_cryptoutil dir_util dir_logger
+	make --directory tools
+
 
 clean:
 	make --directory AddressUtil clean
@@ -105,6 +108,7 @@ clean:
 	make --directory util clean
 	make --directory cudaInfo clean
 	make --directory Logger clean
+	make --directory tools clean
 
 	rm -rf ${LIBDIR}
 	rm -rf ${BINDIR}
