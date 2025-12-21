@@ -318,8 +318,8 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
   cudaEventElapsedTime(&h2d_ms, h2d_start, h2d_stop);
 
   // Launch kernel
-  int blocks = 256;
   int threads = 256;
+  int blocks = (config_.batch_keys + threads - 1) / threads;
 
   if (config_.experiment == ExperimentType::DIFFERENTIAL) {
     if (config_.diff_config.delta_set.empty()) {

@@ -1,0 +1,108 @@
+{
+  "num_records": 1048576,
+  "tests": {
+    "chi_square": {
+      "test": "chi_square_uniformity",
+      "statistic": 5042.04150390625,
+      "p_value": 0.0,
+      "dof": 255,
+      "pass": false,
+      "expected_mean": 4096.0,
+      "observed_range": [
+        2967,
+        4921
+      ]
+    },
+    "rank_test": {
+      "test": "rank_test_sliding_window",
+      "mean_rank": 8.0,
+      "expected_rank": 8.0,
+      "std_rank": 0.0,
+      "num_windows": 100,
+      "p_value": 1.0,
+      "pass": true
+    },
+    "collision_rate": {
+      "test": "collision_rate",
+      "observed_rate": 0.9375009536743164,
+      "expected_rate": 0.0,
+      "unique_values": 65535,
+      "total_values": 1048576,
+      "collisions": 983041,
+      "p_value": 0.0,
+      "pass": false
+    },
+    "serial_correlation": {
+      "test": "serial_correlation",
+      "lag_1_correlation": 0.001463442456145576,
+      "max_correlation": 0.001463442456145576,
+      "correlations": [
+        0.001463442456145576,
+        0.0008954432840222087,
+        0.0006335625340258926,
+        0.0003265382817706759,
+        -0.0010742844442010952,
+        0.0010835701845737834,
+        0.0009432206398159666,
+        0.0001333446904342012,
+        0.0010244886770427017,
+        -0.00124698393845403
+      ],
+      "threshold": 0.1,
+      "pass": true
+    },
+    "differential_bias": {
+      "test": "differential_bias",
+      "max_bias": 0.005451202392578125,
+      "mean_bias": 0.0016536563634872437,
+      "biased_bits": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        12,
+        13,
+        16,
+        17,
+        18,
+        19,
+        20,
+        23,
+        27,
+        30,
+        34,
+        35,
+        36,
+        41,
+        44,
+        47,
+        48,
+        49,
+        50,
+        52,
+        54,
+        55,
+        57,
+        58,
+        62,
+        63
+      ],
+      "num_biased_bits": 33,
+      "pass": false
+    },
+    "small_modulus_lattice": {
+      "test": "small_modulus_lattice",
+      "collision_rate_m1": 0.9603385925292969,
+      "expected_rate_m1": 1.0,
+      "collision_rate_m2": 0.9375009536743164,
+      "expected_rate_m2": 1.0,
+      "autocorr_m1": -0.0022765476429572793,
+      "autocorr_m2": -0.0021824255947975333,
+      "pass": true
+    }
+  },
+  "overall_pass": false
+}

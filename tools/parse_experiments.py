@@ -116,6 +116,53 @@ def validate_record_format(df: pd.DataFrame) -> Dict[str, Any]:
     return results
 
 
+def parse_point_file(filename: str) -> pd.DataFrame:
+    """
+    Parse 41-byte point records from binary file.
+    
+    Record format (41 bytes):
+    - batch_id (4 bytes)
+    - index (4 bytes)
+    - x (32 bytes): big-endian
+    - y_parity (1 byte)
+    """
+    records = []
+    path = Path(filename)
+    
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {filename}")
+    
+    file_size = path.stat().st_size
+    if file_size % 41 != 0:
+        raise ValueError(f"File size {file_size} is not a multiple of 41 bytes")
+    
+    num_records = file_size // 41
+    print(f"Parsing {num_records} point records from {filename}")
+    
+    with open(filename, 'rb') as f:
+        for i in range(num_records):
+            data = f.read(41)
+            if len(data) < 41:
+                break
+            
+            batch_id = struct.unpack('<I', data[0:4])[0]
+            index = struct.unpack('<I', data[4:8])[0]
+            x = data[8:40]
+            y_parity = data[40]
+            
+            records.append({
+                'batch_id': batch_id,
+                'index': index,
+                'x': x.hex(),
+                'x_int': int.from_bytes(x, byteorder='big'),
+                'y_parity': y_parity
+            })
+    
+    df = pd.DataFrame(records)
+    print(f"Parsed {len(df)} records successfully")
+    return df
+
+
 def export_to_csv(df: pd.DataFrame, output_file: str, limit: int = None):
     """
     Export differential records to CSV for analysis.
@@ -230,8 +277,11 @@ if __name__ == '__main__':
         print("\nValidation Results:")
         print(f"  Total records: {validation['total_records']}")
         print(f"  Unique deltas: {validation['unique_delta_values']}")
+    elif size > 0 and size % 41 == 0:
+        print(f"Detected Point format (multiple of 41 bytes)")
+        df = parse_point_file(filename)
     else:
-        print(f"Unknown file format (size {size} not multiple of 60 or 108)")
+        print(f"Unknown file format (size {size} not multiple of 41, 60 or 108)")
         sys.exit(1)
     
     # Show first few records

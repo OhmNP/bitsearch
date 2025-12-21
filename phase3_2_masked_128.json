@@ -1,0 +1,1 @@
+{"timestamp":1766359526,"batch_id":0,"family":"masked","start_k":"","mask_bits":3878223808,"stride":140732776644544,"num_keys":1048576,"kernel_ms":6693.7744,"h2d_ms":3.9451,"d2h_ms":4.1443,"cpu_prep_ms":206.7551,"cpu_wait_gpu_ms":0.0000,"sampled_points":1048576,"matches":3877777007}

@@ -1,0 +1,76 @@
+{
+  "num_records": 1048576,
+  "tests": {
+    "chi_square": {
+      "test": "chi_square_uniformity",
+      "statistic": 256.7685546875,
+      "p_value": 0.45713998270375067,
+      "dof": 255,
+      "pass": true,
+      "expected_mean": 4096.0,
+      "observed_range": [
+        3915,
+        4240
+      ]
+    },
+    "rank_test": {
+      "test": "rank_test_sliding_window",
+      "mean_rank": 8.0,
+      "expected_rank": 8.0,
+      "std_rank": 0.0,
+      "num_windows": 100,
+      "p_value": 1.0,
+      "pass": true
+    },
+    "collision_rate": {
+      "test": "collision_rate",
+      "observed_rate": 0.0,
+      "expected_rate": 0.0,
+      "unique_values": 1048576,
+      "total_values": 1048576,
+      "collisions": 0,
+      "p_value": 1.0,
+      "pass": true
+    },
+    "serial_correlation": {
+      "test": "serial_correlation",
+      "lag_1_correlation": -0.0005074978578946296,
+      "max_correlation": 0.0016431903287095083,
+      "correlations": [
+        -0.0005074978578946296,
+        3.8107430029266665e-05,
+        0.0004484182358342561,
+        -0.0016431903287095083,
+        0.00041569621489723316,
+        -0.00158523225415221,
+        -9.441373397255582e-05,
+        -0.0010853809195362505,
+        0.0005807638566015994,
+        -0.0009103002162061768
+      ],
+      "threshold": 0.1,
+      "pass": true
+    },
+    "differential_bias": {
+      "test": "differential_bias",
+      "max_bias": 0.0012798309326171875,
+      "mean_bias": 0.00043155252933502197,
+      "biased_bits": [
+        62
+      ],
+      "num_biased_bits": 1,
+      "pass": false
+    },
+    "small_modulus_lattice": {
+      "test": "small_modulus_lattice",
+      "collision_rate_m1": 0.9375009536743164,
+      "expected_rate_m1": 1.0,
+      "collision_rate_m2": 0.00012683868408203125,
+      "expected_rate_m2": 1.0,
+      "autocorr_m1": -0.00022743527432362692,
+      "autocorr_m2": -0.0010586832345667683,
+      "pass": true
+    }
+  },
+  "overall_pass": false
+}

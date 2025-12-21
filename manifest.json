@@ -1,14 +1,14 @@
 {
   "version": "1.0",
-  "timestamp": 1766356877,
-  "family": "consecutive",
-  "start_k": "0x1",
-  "batch_keys": 256,
+  "timestamp": 1766359628,
+  "family": "stride",
+  "start_k": "0x831664",
+  "batch_keys": 1048576,
   "batches": 1,
-  "total_keys": 256,
+  "total_keys": 1048576,
   "sample_rate": 1,
   "seed": 0,
   "device": 0,
-  "output_file": "test_endo_diff.bin",
-  "telemetry_file": "test_endo_diff.json"
+  "output_file": "phase3_2_stride_256.bin",
+  "telemetry_file": "phase3_2_stride_256.json"
 }

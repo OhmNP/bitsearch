@@ -97,45 +97,74 @@ private:
   secp256k1::uint256 start_k_;
 };
 
-// Masked family: (fixed_high << mask_bits) | i
+// Masked family: (fixed_high) | (random & mask)
 class MaskedKeyGenerator : public KeyGenerator {
 public:
-  MaskedKeyGenerator(const secp256k1::uint256 &start_k, uint32_t mask_bits)
+  MaskedKeyGenerator(const secp256k1::uint256 &start_k, uint32_t mask_bits,
+                     uint64_t seed)
       : fixed_high_(start_k), mask_bits_(mask_bits) {
 
-    if (mask_bits > 128) {
-      throw std::runtime_error("Mask bits must be <= 128");
+    if (mask_bits > 256) {
+      throw std::runtime_error("Mask bits must be <= 256");
     }
 
-    // Shift fixed_high left by mask_bits
-    // For simplicity, we'll use the start_k as the high bits directly
-    // and OR with the variable low bits
+    if (seed == 0) {
+      seed = static_cast<uint64_t>(std::time(nullptr));
+    }
+    rng_.seed(seed);
   }
 
   void generateBatch(uint32_t batch_id, uint64_t batch_size,
                      std::vector<secp256k1::uint256> &keys_out) override {
     keys_out.resize(batch_size);
 
-    uint64_t base_offset = batch_id * batch_size;
-
     for (uint64_t i = 0; i < batch_size; i++) {
-      uint64_t variable_bits = base_offset + i;
+      // Generate random 256-bit value
+      uint64_t r0 = rng_();
+      uint64_t r1 = rng_();
+      uint64_t r2 = rng_();
+      uint64_t r3 = rng_();
 
-      // Check that variable_bits fits in mask_bits
-      if (mask_bits_ < 64) {
-        uint64_t max_val = (1ULL << mask_bits_) - 1;
-        if (variable_bits > max_val) {
-          throw std::runtime_error(
-              "Masked key generation exceeded mask bit range");
+      unsigned int words[8];
+      words[0] = static_cast<uint32_t>(r0);
+      words[1] = static_cast<uint32_t>(r0 >> 32);
+      words[2] = static_cast<uint32_t>(r1);
+      words[3] = static_cast<uint32_t>(r1 >> 32);
+      words[4] = static_cast<uint32_t>(r2);
+      words[5] = static_cast<uint32_t>(r2 >> 32);
+      words[6] = static_cast<uint32_t>(r3);
+      words[7] = static_cast<uint32_t>(r3 >> 32);
+
+      // Apply Mask
+      for (int b = 0; b < 256; b++) {
+        if (b >= mask_bits_) {
+          int word_idx = b / 32; // 0 is LSB word in this array layout?
+          // ControlKeyGenerator uses words[0] as LSB parts of r0?
+          // r0 is rng_().
+          // words[0] = r0 & 0xFFFFFFFF.
+          // words[1] = r0 >> 32.
+          // So words[0] is bits 0-31. words[1] 32-63.
+          // Correct.
+          int bit_idx = b % 32;
+          words[word_idx] &= ~(1U << bit_idx);
         }
       }
 
-      // Construct key: fixed_high | variable_bits
-      secp256k1::uint256 key = fixed_high_ + variable_bits;
+      secp256k1::uint256 key(words);
+
+      // OR with fixed_high
+      // Assuming fixed_high has 0s in mask region (or we just OR it)
+      key = key + fixed_high_; // + or | ? User said `random & mask`. fixed_high
+                               // is header.
 
       if (!(key < secp256k1::N)) {
-        throw std::runtime_error("Masked key generation exceeded group order");
+        // Retry or just clamp? Masked random should be fine usually if high
+        // bits are 0. If high bits are set, might overflow.
+        while (!(key < secp256k1::N))
+          key = key - secp256k1::N;
       }
+      if (key.isZero())
+        key = secp256k1::uint256(1);
 
       keys_out[i] = key;
     }
@@ -143,12 +172,13 @@ public:
 
   secp256k1::uint256 getBatchStartKey(uint32_t batch_id,
                                       uint64_t batch_size) override {
-    return fixed_high_ + (batch_id * batch_size);
+    return fixed_high_;
   }
 
 private:
   secp256k1::uint256 fixed_high_;
   uint32_t mask_bits_;
+  std::mt19937_64 rng_;
 };
 
 // Stride family: start_k + i * stride
@@ -259,7 +289,7 @@ std::unique_ptr<KeyGenerator> createKeyGenerator(const ECDumpConfig &config) {
 
   case KeyFamily::MASKED:
     return std::make_unique<MaskedKeyGenerator>(config.start_k,
-                                                config.mask_bits);
+                                                config.mask_bits, config.seed);
 
   case KeyFamily::STRIDE:
     return std::make_unique<StrideKeyGenerator>(config.start_k, config.stride);
