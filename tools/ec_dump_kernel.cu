@@ -495,4 +495,323 @@ __global__ void computeDifferentialKernel(
   delta_P_x_mod_m2[threadId] = mod_4294967291(delta_P_x_local);
 }
 
+// Endomorphism Kernel
+__global__ void computeEndomorphismKernel(
+    const unsigned int *keys, // k
+    const unsigned int
+        *lambda_keys,           // k_lambda = lambda * k (precomputed on host)
+    unsigned int *x_out,        // P.x
+    unsigned int *beta_x_out,   // P_phi.x
+    unsigned int *lambda_x_out, // P_lambda.x
+    unsigned int *flags_out,    // Flags: 0:Py, 1:Pphi.y, 2:Plambda.y, 3:Match
+    const unsigned int *gxPtr, const unsigned int *gyPtr, int num_keys) {
+  int threadId = blockDim.x * blockIdx.x + threadIdx.x;
+  if (threadId >= num_keys)
+    return;
+
+  unsigned int k[8];
+  unsigned int k_lam[8];
+
+  // Load keys (contiguous 8 words per key)
+  int base_in = threadId * 8;
+  for (int i = 0; i < 8; i++) {
+    k[i] = keys[base_in + i];
+    k_lam[i] = lambda_keys[base_in + i];
+  }
+
+  // Lambda to compute point from scalar
+  auto computePoint = [&](const unsigned int *scalar, unsigned int *px,
+                          unsigned int *py) {
+    // Init infinity
+    for (int i = 0; i < 8; i++) {
+      px[i] = 0xFFFFFFFF;
+      py[i] = 0xFFFFFFFF;
+    }
+
+    for (int i = 0; i < 256; i++) {
+      int wordIdx = i / 32;
+      int bitIdx = i % 32;
+      int actualWordIdx = 7 - wordIdx;
+      int actualBitIdx = 31 - bitIdx;
+      bool bitSet = (scalar[actualWordIdx] & (1U << actualBitIdx)) != 0;
+
+      if (bitSet) {
+        unsigned int gx[8], gy[8];
+        int baseIdx = (255 - i) * 8; // Correct index for 2^(255-i) * G
+        for (int j = 0; j < 8; j++) {
+          gx[j] = gxPtr[baseIdx + j];
+          gy[j] = gyPtr[baseIdx + j];
+        }
+
+        if (isInfinity(px)) {
+          copyBigInt(gx, px);
+          copyBigInt(gy, py);
+        } else {
+          unsigned int newX[8], newY[8];
+          if (equal(px, gx)) {
+            // Double
+            unsigned int x2[8], tx2[8], y2[8], y2inv[8], s[8], s2[8], diff[8];
+            mulModP(px, px, x2);
+            addModP(x2, x2, tx2);
+            addModP(x2, tx2, tx2); // 3x^2
+            addModP(py, py, y2);
+            invModP(y2, y2inv);
+            mulModP(tx2, y2inv, s);
+            mulModP(s, s, s2);
+            subModP(s2, px, newX);
+            subModP(newX, px, newX);
+            subModP(px, newX, diff);
+            mulModP(s, diff, newY);
+            subModP(newY, py, newY);
+          } else {
+            // Add
+            unsigned int rise[8], run[8], runInv[8], s[8], s2[8], diff[8];
+            subModP(gy, py, rise);
+            subModP(gx, px, run);
+            invModP(run, runInv);
+            mulModP(rise, runInv, s);
+            mulModP(s, s, s2);
+            subModP(s2, gx, newX);
+            subModP(newX, px, newX);
+            subModP(gx, newX, diff);
+            mulModP(s, diff, newY);
+            subModP(newY, gy, newY);
+          }
+          copyBigInt(newX, px);
+          copyBigInt(newY, py);
+        }
+      }
+    }
+  };
+
+  // 1. Compute P = kG
+  unsigned int P_x[8], P_y[8];
+  computePoint(k, P_x, P_y);
+
+  // 2. Compute P_phi = (beta * P.x, P.y)
+  unsigned int P_phi_x[8]; // y is same as P_y
+  mulModP(_BETA, P_x, P_phi_x);
+
+  // 3. Compute P_lambda = k_lam * G
+  unsigned int P_lam_x[8], P_lam_y[8];
+  computePoint(k_lam, P_lam_x, P_lam_y);
+
+  // 4. Verify P_phi == P_lambda
+  bool match = equal(P_phi_x, P_lam_x) && equal(P_y, P_lam_y);
+
+  // 5. Output
+  // Assume BigEndian output desired (word 0 is MSB)
+  // Structure of Arrays output
+  int base_out = threadId * 8; // Contiguous for each array
+  for (int i = 0; i < 8; i++) {
+    x_out[base_out + i] = P_x[i];
+    beta_x_out[base_out + i] = P_phi_x[i];
+    lambda_x_out[base_out + i] = P_lam_x[i];
+  }
+
+  // Flags
+  int p_y_parity = (P_y[7] & 1);
+  int p_phi_y_parity = p_y_parity; // Same Y
+  int p_lam_y_parity = (P_lam_y[7] & 1);
+  int match_flag = match ? 1 : 0;
+
+  unsigned int flags = (match_flag << 3) | (p_lam_y_parity << 2) |
+                       (p_phi_y_parity << 1) | p_y_parity;
+  flags_out[threadId] = flags;
+}
+
+cudaError_t launchEndomorphismKernel(
+    const unsigned int *d_keys, const unsigned int *d_lambda_keys,
+    unsigned int *d_x, unsigned int *d_beta_x, unsigned int *d_lambda_x,
+    unsigned int *d_flags, const unsigned int *d_gx, const unsigned int *d_gy,
+    int numKeys, int blocks, int threads, cudaEvent_t start, cudaEvent_t stop) {
+  cudaEventRecord(start);
+  computeEndomorphismKernel<<<blocks, threads>>>(d_keys, d_lambda_keys, d_x,
+                                                 d_beta_x, d_lambda_x, d_flags,
+                                                 d_gx, d_gy, numKeys);
+  cudaEventRecord(stop);
+  return cudaGetLastError();
+}
+
+// Endomorphism Differential Kernel
+__global__ void computeEndoDiffKernel(const unsigned int *keys,  // k
+                                      uint32_t delta_value,      // delta
+                                      unsigned int *delta_phi_x, // Output Δφ.x
+                                      uint32_t *flags_out,       // Output flags
+                                      const unsigned int *gxPtr,
+                                      const unsigned int *gyPtr, int num_keys) {
+
+  int threadId = blockDim.x * blockIdx.x + threadIdx.x;
+  if (threadId >= num_keys)
+    return;
+
+  // Load private key k
+  unsigned int k[8];
+  int base_in = threadId * 8;
+  for (int i = 0; i < 8; i++) {
+    k[i] = keys[base_in + i];
+  }
+
+  // Compute k' = k + delta
+  unsigned int k_prime[8];
+  uint64_t carry = delta_value;
+  for (int i = 0; i < 8; i++) {
+    uint64_t sum = (uint64_t)k[i] + carry;
+    k_prime[i] = (unsigned int)(sum & 0xFFFFFFFF);
+    carry = sum >> 32;
+  }
+
+  // Lambda to compute point from scalar
+  auto computePoint = [&](const unsigned int *scalar, unsigned int *px,
+                          unsigned int *py) {
+    for (int i = 0; i < 8; i++)
+      px[i] = py[i] = 0xFFFFFFFF; // Init infinity
+
+    for (int i = 0; i < 256; i++) {
+      int wordIdx = i / 32;
+      int bitIdx = i % 32;
+      int actualWordIdx = 7 - wordIdx;
+      int actualBitIdx = 31 - bitIdx;
+      bool bitSet = (scalar[actualWordIdx] & (1U << actualBitIdx)) != 0;
+
+      if (bitSet) {
+        unsigned int gx[8], gy[8];
+        int baseIdx = (255 - i) * 8; // Correct index order
+        for (int j = 0; j < 8; j++) {
+          gx[j] = gxPtr[baseIdx + j];
+          gy[j] = gyPtr[baseIdx + j];
+        }
+
+        if (isInfinity(px)) {
+          copyBigInt(gx, px);
+          copyBigInt(gy, py);
+        } else {
+          unsigned int newX[8], newY[8];
+          if (equal(px, gx)) {
+            // Double
+            unsigned int x2[8], tx2[8], y2[8], y2inv[8], s[8], s2[8], diff[8];
+            mulModP(px, px, x2);
+            addModP(x2, x2, tx2);
+            addModP(x2, tx2, tx2); // 3x^2
+            addModP(py, py, y2);
+            invModP(y2, y2inv);
+            mulModP(tx2, y2inv, s);
+            mulModP(s, s, s2);
+            subModP(s2, px, newX);
+            subModP(newX, px, newX);
+            subModP(px, newX, diff);
+            mulModP(s, diff, newY);
+            subModP(newY, py, newY);
+          } else {
+            // Add
+            unsigned int rise[8], run[8], runInv[8], s[8], s2[8], diff[8];
+            subModP(gy, py, rise);
+            subModP(gx, px, run);
+            invModP(run, runInv);
+            mulModP(rise, runInv, s);
+            mulModP(s, s, s2);
+            subModP(s2, gx, newX);
+            subModP(newX, px, newX);
+            subModP(gx, newX, diff);
+            mulModP(s, diff, newY);
+            subModP(newY, gy, newY);
+          }
+          copyBigInt(newX, px);
+          copyBigInt(newY, py);
+        }
+      }
+    }
+  };
+
+  // 1. Compute P1 = kG
+  unsigned int P1_x[8], P1_y[8];
+  computePoint(k, P1_x, P1_y);
+
+  // 2. Compute P2 = k'G
+  unsigned int P2_x[8], P2_y[8];
+  computePoint(k_prime, P2_x, P2_y);
+
+  // 3. Apply Endomorphism phi(x,y) = (beta*x, y)
+  // Store directly back into P variables to save registers
+  // P1_x = beta * P1_x
+  unsigned int temp[8];
+  mulModP(_BETA, P1_x, temp);
+  copyBigInt(temp, P1_x);
+
+  // P2_x = beta * P2_x
+  mulModP(_BETA, P2_x, temp);
+  copyBigInt(temp, P2_x);
+
+  // 4. Compute Delta = P2 - P1 = P2 + (-P1)
+  // -P1 = (x, -y)
+  unsigned int neg_P1_y[8];
+  subModP(_P, P1_y, neg_P1_y);
+
+  unsigned int D_x[8], D_y[8];
+
+  if (equal(P2_x, P1_x)) {
+    // Check if P2 == P1 (Delta = 0) or P2 == -P1 (Delta = 2*P2)
+    // For endomorphism, x coordinates match only if points are equal or
+    // negations. If equal, difference is infinity.
+    for (int i = 0; i < 8; i++) {
+      D_x[i] = 0;
+      D_y[i] = 0;
+    }
+  } else {
+    // Standard addition P2 + (-P1)
+    unsigned int rise[8], run[8], runInv[8], s[8], s2[8], diff[8];
+    subModP(neg_P1_y, P2_y,
+            rise); // (-y1) - y2 ?? No, P2.y - (-P1.y) = y2 + y1?
+    // Wait. Point subtraction P2 - P1 is P2 + (-P1).
+    // -P1 = (P1.x, -P1.y)
+    // Slope s = (P2.y - (-P1.y)) / (P2.x - P1.x)
+    //         = (P2.y + P1.y) / (P2.x - P1.x) ... IF we use mod arithmetic
+    //         carefully.
+    // But let's stick to standard subModP:
+    // rise = (-P1.y) - P2.y  <-- Wait, standard slope is (y2 - y1) / (x2 - x1)
+    // Target: (P2 + (-P1))
+    // Point A = P2, Point B = -P1
+    // slope = (B.y - A.y) / (B.x - A.x)
+    //       = (neg_P1_y - P2_y) / (P1_x - P2_x)
+
+    subModP(neg_P1_y, P2_y, rise);
+    subModP(P1_x, P2_x, run); // using P1_x because -P1.x = P1.x
+
+    invModP(run, runInv);
+    mulModP(rise, runInv, s);
+    mulModP(s, s, s2);
+
+    // x3 = s^2 - x1 - x2
+    subModP(s2, P2_x, D_x);
+    subModP(D_x, P1_x, D_x);
+
+    // y3 = s(x1 - x3) - y1
+    // Use P2 as anchor (A)
+    subModP(P2_x, D_x, diff);
+    mulModP(s, diff, D_y);
+    subModP(D_y, P2_y, D_y);
+  }
+
+  // Output in AoS format (compatible with host expectations)
+  int base_out = threadId * 8;
+  for (int i = 0; i < 8; i++) {
+    delta_phi_x[base_out + i] = D_x[i]; // Internal is likely Big Endian? Or we
+                                        // want to reverse reversal.
+  }
+
+  // Flags: P1.y parity (bit 0), P2.y parity (bit 1)
+  flags_out[threadId] = ((P2_y[7] & 1) << 1) | (P1_y[7] & 1);
+}
+
+cudaError_t launchEndoDiffKernel(
+    const unsigned int *d_keys, uint32_t delta, unsigned int *d_delta_phi_x,
+    unsigned int *d_flags, const unsigned int *d_gx, const unsigned int *d_gy,
+    int numKeys, int blocks, int threads, cudaEvent_t start, cudaEvent_t stop) {
+  cudaEventRecord(start);
+  computeEndoDiffKernel<<<blocks, threads>>>(d_keys, delta, d_delta_phi_x,
+                                             d_flags, d_gx, d_gy, numKeys);
+  cudaEventRecord(stop);
+  return cudaGetLastError();
+}
+
 } // namespace ecdump

@@ -132,11 +132,71 @@ def export_to_csv(df: pd.DataFrame, output_file: str, limit: int = None):
     print(f"Exported {len(df)} records to {output_file}")
 
 
+
+def parse_endomorphism_file(filename: str) -> pd.DataFrame:
+    """
+    Parse 108-byte endomorphism records from binary file.
+    
+    Record format (108 bytes):
+    - batch_id (4 bytes): Batch ID (little-endian)
+    - index_in_batch (4 bytes): Index within batch (little-endian)
+    - x (32 bytes): P.x (big-endian)
+    - beta_x (32 bytes): P_phi.x (big-endian)
+    - lambda_x (32 bytes): P_lambda.x (big-endian)
+    - flags (4 bytes): Flags (little-endian)
+    
+    Args:
+        filename: Path to binary endomorphism file
+        
+    Returns:
+        DataFrame with columns
+    """
+    records = []
+    path = Path(filename)
+    
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {filename}")
+    
+    file_size = path.stat().st_size
+    if file_size % 108 != 0:
+        raise ValueError(f"File size {file_size} is not a multiple of 108 bytes")
+    
+    num_records = file_size // 108
+    print(f"Parsing {num_records} endomorphism records from {filename}")
+    
+    with open(filename, 'rb') as f:
+        for i in range(num_records):
+            data = f.read(108)
+            if len(data) < 108:
+                break
+            
+            # Parse fields
+            batch_id = struct.unpack('<I', data[0:4])[0]
+            index_in_batch = struct.unpack('<I', data[4:8])[0]
+            x = data[8:40]
+            beta_x = data[40:72]
+            lambda_x = data[72:104]
+            flags = struct.unpack('<I', data[104:108])[0]
+            
+            records.append({
+                'batch_id': batch_id,
+                'index': index_in_batch,
+                'x': x.hex(),
+                'beta_x': beta_x.hex(),
+                'lambda_x': lambda_x.hex(),
+                'flags': flags,
+                'match': (flags >> 3) & 1  # Bit 3 is match flag
+            })
+    
+    df = pd.DataFrame(records)
+    print(f"Parsed {len(df)} records successfully")
+    return df
+
 if __name__ == '__main__':
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python parse_experiments.py <differential_file.bin> [--csv output.csv] [--limit N]")
+        print("Usage: python parse_experiments.py <file.bin> [--csv output.csv] [--limit N]")
         sys.exit(1)
     
     filename = sys.argv[1]
@@ -155,17 +215,24 @@ if __name__ == '__main__':
         else:
             i += 1
     
-    # Parse file
-    df = parse_differential_file(filename)
+    # Detect type by size
+    path = Path(filename)
+    size = path.stat().st_size
     
-    # Validate
-    validation = validate_record_format(df)
-    print("\nValidation Results:")
-    print(f"  Total records: {validation['total_records']}")
-    print(f"  Unique deltas: {validation['unique_delta_values']}")
-    print(f"  Unique batches: {validation['unique_batches']}")
-    print(f"  Mod m1 valid: {validation['mod_m1_valid']}")
-    print(f"  Mod m2 valid: {validation['mod_m2_valid']}")
+    if size > 0 and size % 108 == 0:
+        print(f"Detected Endomorphism format (multiple of 108 bytes)")
+        df = parse_endomorphism_file(filename)
+    elif size > 0 and size % 60 == 0:
+        print(f"Detected Differential format (multiple of 60 bytes)")
+        df = parse_differential_file(filename)
+        # Validate differential
+        validation = validate_record_format(df)
+        print("\nValidation Results:")
+        print(f"  Total records: {validation['total_records']}")
+        print(f"  Unique deltas: {validation['unique_delta_values']}")
+    else:
+        print(f"Unknown file format (size {size} not multiple of 60 or 108)")
+        sys.exit(1)
     
     # Show first few records
     print("\nFirst 5 records:")

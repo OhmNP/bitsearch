@@ -305,6 +305,7 @@ class DifferentialAnalyzer:
             'pass': collision_ok and autocorr_ok
         }
     
+    
     def run_all_tests(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
         Run all statistical tests on differential data.
@@ -340,10 +341,69 @@ class DifferentialAnalyzer:
         return results
 
 
+class EndomorphismAnalyzer(DifferentialAnalyzer):
+    """Statistical test suite for Endomorphism data."""
+    
+    def run_all_tests(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Run statistical tests on endomorphism data.
+        
+        Args:
+            df: DataFrame parsing endomorphism records
+        """
+        # Convert hex strings to integers if needed
+        # In current parser, beta_x is hex string.
+        # We need integer array for tests.
+        if 'beta_x_int' not in df.columns:
+            df['beta_x_int'] = df['beta_x'].apply(lambda x: int(x, 16))
+            
+        data = df['beta_x_int'].values
+        matches = df['match'].values
+        
+        results = {
+            'num_records': len(df),
+            'tests': {}
+        }
+        
+        # 1. Correctness Test (Match flag)
+        match_rate = np.mean(matches)
+        results['tests']['correctness'] = {
+            'test': 'correctness_match_rate',
+            'match_rate': float(match_rate),
+            'failures': int(len(matches) - np.sum(matches)),
+            'pass': match_rate == 1.0
+        }
+        
+        # 2. Chi-Square Uniformity of beta_x
+        results['tests']['chi_square'] = self.chi_square_uniformity(data)
+        
+        # 3. Collision Rate (should be low for beta_x)
+        results['tests']['collision_rate'] = self.collision_rate_test(data)
+        
+        # 4. Serial Correlation (should be low)
+        results['tests']['serial_correlation'] = self.serial_correlation_test(data)
+        
+        # 5. Bias Test
+        results['tests']['differential_bias'] = self.differential_bias_test(data)
+        
+        # Overall pass/fail
+        all_pass = all(test.get('pass', False) for test in results['tests'].values())
+        results['overall_pass'] = all_pass
+        
+        return results
+
+
 if __name__ == '__main__':
     import sys
     import json
-    from parse_experiments import parse_differential_file
+    import sys
+    import json
+    # Try importing parse_endomorphism_file if available
+    try:
+        from parse_experiments import parse_differential_file, parse_endomorphism_file
+    except ImportError:
+        from parse_experiments import parse_differential_file
+        parse_endomorphism_file = None
     
     if len(sys.argv) < 2:
         print("Usage: python crypto_analysis.py <differential_file.bin> [--output results.json]")
@@ -357,13 +417,34 @@ if __name__ == '__main__':
         if idx + 1 < len(sys.argv):
             output_file = sys.argv[idx + 1]
     
-    # Parse differential file
-    print(f"Parsing {filename}...")
-    df = parse_differential_file(filename)
+    # Parse file - delegate to parse_experiments detection logic?
+    # No, parse_experiments.py main does detection but library functions parse specific formats.
+    # We should add detection here or import it.
+    # Simplest: Check size manually or use parse_experiments "detection" via shelling out?
+    # Better: Inspect size.
+    import os
+    fsize = os.path.getsize(filename)
+    
+    if fsize > 0 and fsize % 108 == 0:
+        print(f"Detected Endomorphism format ({fsize} bytes)")
+        if parse_endomorphism_file:
+            df = parse_endomorphism_file(filename)
+            analyzer_cls = EndomorphismAnalyzer
+        else:
+             print("Error: parse_endomorphism_file not available")
+             sys.exit(1)
+    elif fsize > 0 and fsize % 60 == 0:
+         print(f"Detected Differential format ({fsize} bytes)")
+         df = parse_differential_file(filename)
+         analyzer_cls = DifferentialAnalyzer
+    else:
+         print(f"Unknown format: {fsize} bytes. Defaulting to Differential parser (may fail).")
+         df = parse_differential_file(filename)
+         analyzer_cls = DifferentialAnalyzer
     
     # Run statistical tests
     print("\nRunning statistical tests...")
-    analyzer = DifferentialAnalyzer(significance_level=0.01)
+    analyzer = analyzer_cls(significance_level=0.01)
     results = analyzer.run_all_tests(df)
     
     # Print results

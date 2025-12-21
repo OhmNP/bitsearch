@@ -152,6 +152,12 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
   uint32_t *d_delta_P_x_mod_m1 = nullptr;
   uint32_t *d_delta_P_x_mod_m2 = nullptr;
 
+  // Endomorphism experiment
+  unsigned int *d_beta_x = nullptr;
+  unsigned int *d_lambda_x = nullptr;
+  unsigned int *d_flags = nullptr;
+  unsigned int *d_lambda_keys = nullptr;
+
   if (config_.experiment == ExperimentType::DIFFERENTIAL) {
     err =
         cudaMalloc(&d_delta_P_x, config_.batch_keys * 8 * sizeof(unsigned int));
@@ -183,10 +189,53 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
       cudaFree(d_delta_P_x_mod_m1);
       throw std::runtime_error("Failed to allocate device memory for mod_m2");
     }
+  } else if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+    err = cudaMalloc(&d_beta_x, config_.batch_keys * 8 * sizeof(unsigned int));
+    if (err != cudaSuccess)
+      throw std::runtime_error("Failed to alloc d_beta_x");
+
+    err =
+        cudaMalloc(&d_lambda_x, config_.batch_keys * 8 * sizeof(unsigned int));
+    if (err != cudaSuccess) {
+      cudaFree(d_beta_x);
+      throw std::runtime_error("Failed to alloc d_lambda_x");
+    }
+
+    err = cudaMalloc(&d_flags, config_.batch_keys * sizeof(unsigned int));
+    if (err != cudaSuccess) {
+      cudaFree(d_beta_x);
+      cudaFree(d_lambda_x);
+      throw std::runtime_error("Failed to alloc d_flags");
+    }
+
+    err = cudaMalloc(&d_lambda_keys,
+                     config_.batch_keys * 8 * sizeof(unsigned int));
+    if (err != cudaSuccess) {
+      cudaFree(d_beta_x);
+      cudaFree(d_lambda_x);
+      cudaFree(d_flags);
+      throw std::runtime_error("Failed to alloc d_lambda_keys");
+    }
+  } else if (config_.experiment == ExperimentType::ENDO_DIFF) {
+    err =
+        cudaMalloc(&d_delta_P_x, config_.batch_keys * 8 * sizeof(unsigned int));
+    if (err != cudaSuccess) {
+      cudaFree(d_keys);
+      cudaFree(d_xCoords);
+      cudaFree(d_yParity);
+      throw std::runtime_error("Failed to alloc d_delta_P_x for ENDO_DIFF");
+    }
+    err = cudaMalloc(&d_flags, config_.batch_keys * sizeof(uint32_t));
+    if (err != cudaSuccess) {
+      cudaFree(d_keys);
+      cudaFree(d_xCoords);
+      cudaFree(d_yParity);
+      cudaFree(d_delta_P_x);
+      throw std::runtime_error("Failed to alloc d_flags for ENDO_DIFF");
+    }
   }
 
-  // Initialize base point table (only once per driver, but for simplicity doing
-  // per batch)
+  // Initialize base point table
   err = initBasePointTable(&d_gxPtr, &d_gyPtr);
   if (err != cudaSuccess) {
     cudaFree(d_keys);
@@ -197,10 +246,20 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
       cudaFree(d_delta_P_x_mod_m1);
       cudaFree(d_delta_P_x_mod_m2);
     }
+    if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+      cudaFree(d_beta_x);
+      cudaFree(d_lambda_x);
+      cudaFree(d_flags);
+      cudaFree(d_lambda_keys);
+    }
+    if (config_.experiment == ExperimentType::ENDO_DIFF) {
+      cudaFree(d_delta_P_x);
+      cudaFree(d_flags);
+    }
     throw std::runtime_error("Failed to initialize base point table");
   }
 
-  // Create CUDA events for timing
+  // Create CUDA events
   cudaEvent_t h2d_start, h2d_stop, kernel_start, kernel_stop, d2h_start,
       d2h_stop;
   cudaEventCreate(&h2d_start);
@@ -210,19 +269,47 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
   cudaEventCreate(&d2h_start);
   cudaEventCreate(&d2h_stop);
 
+  // Prepare Lambda Keys (if Endo)
+  std::vector<unsigned int> h_lambda_keys;
+  if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+    h_lambda_keys.resize(config_.batch_keys * 8);
+    for (size_t i = 0; i < keys.size(); i++) {
+      secp256k1::uint256 k_lam =
+          secp256k1::multiplyModN(keys[i], secp256k1::LAMBDA);
+      k_lam.exportWords(&h_lambda_keys[i * 8], 8,
+                        secp256k1::uint256::LittleEndian);
+    }
+  }
+
   // H2D transfer
   cudaEventRecord(h2d_start);
   err = cudaMemcpy(d_keys, h_keys.data(),
                    config_.batch_keys * 8 * sizeof(unsigned int),
                    cudaMemcpyHostToDevice);
+
+  if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+    cudaMemcpy(d_lambda_keys, h_lambda_keys.data(),
+               config_.batch_keys * 8 * sizeof(unsigned int),
+               cudaMemcpyHostToDevice);
+  }
+
   cudaEventRecord(h2d_stop);
   cudaEventSynchronize(h2d_stop);
 
   if (err != cudaSuccess) {
-    // Cleanup
     cudaFree(d_keys);
     cudaFree(d_xCoords);
     cudaFree(d_yParity);
+    if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+      cudaFree(d_beta_x);
+      cudaFree(d_lambda_x);
+      cudaFree(d_flags);
+      cudaFree(d_lambda_keys);
+    }
+    if (config_.experiment == ExperimentType::ENDO_DIFF) {
+      cudaFree(d_delta_P_x);
+      cudaFree(d_flags);
+    }
     freeBasePointTable(d_gxPtr, d_gyPtr);
     throw std::runtime_error("H2D transfer failed");
   }
@@ -230,13 +317,15 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
   float h2d_ms;
   cudaEventElapsedTime(&h2d_ms, h2d_start, h2d_stop);
 
-  // Launch kernel (differential or baseline mode)
+  // Launch kernel
   int blocks = 256;
   int threads = 256;
 
   if (config_.experiment == ExperimentType::DIFFERENTIAL) {
-    // Differential mode: validate delta_set and launch differential kernel
     if (config_.diff_config.delta_set.empty()) {
+      // Cleanup logic omitted for brevity in rewrite logic, but should be here?
+      // Let's assume user provides delta-set or throw before cleanup.
+      // But wait, I must cleanup.
       cudaFree(d_keys);
       cudaFree(d_xCoords);
       cudaFree(d_yParity);
@@ -246,7 +335,6 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
       freeBasePointTable(d_gxPtr, d_gyPtr);
       throw std::runtime_error("Differential experiment requires --delta-set");
     }
-
     uint32_t delta = config_.diff_config.delta_set[0];
     uint8_t family_id = static_cast<uint8_t>(config_.family);
     uint8_t param = (config_.family == KeyFamily::MASKED)
@@ -259,8 +347,19 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
         d_keys, delta, d_delta_P_x, d_delta_P_x_mod_m1, d_delta_P_x_mod_m2,
         batch_id, family_id, param, config_.batch_keys, d_gxPtr, d_gyPtr,
         blocks, threads, kernel_start, kernel_stop);
+  } else if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+    err = launchEndomorphismKernel(d_keys, d_lambda_keys, d_xCoords, d_beta_x,
+                                   d_lambda_x, d_flags, d_gxPtr, d_gyPtr,
+                                   config_.batch_keys, blocks, threads,
+                                   kernel_start, kernel_stop);
+  } else if (config_.experiment == ExperimentType::ENDO_DIFF) {
+    uint32_t delta = config_.diff_config.delta_set.empty()
+                         ? 1
+                         : config_.diff_config.delta_set[0];
+    err = launchEndoDiffKernel(d_keys, delta, d_delta_P_x, d_flags, d_gxPtr,
+                               d_gyPtr, config_.batch_keys, blocks, threads,
+                               kernel_start, kernel_stop);
   } else {
-    // Baseline mode: launch standard point computation kernel
     err = launchComputePoints(d_keys, d_xCoords, d_yParity, config_.batch_keys,
                               d_gxPtr, d_gyPtr, blocks, threads, kernel_start,
                               kernel_stop);
@@ -272,6 +371,16 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
     cudaFree(d_keys);
     cudaFree(d_xCoords);
     cudaFree(d_yParity);
+    if (config_.experiment == ExperimentType::ENDO_DIFF) {
+      cudaFree(d_delta_P_x);
+      cudaFree(d_flags);
+    }
+    if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+      cudaFree(d_beta_x);
+      cudaFree(d_lambda_x);
+      cudaFree(d_flags);
+      cudaFree(d_lambda_keys);
+    }
     freeBasePointTable(d_gxPtr, d_gyPtr);
     throw std::runtime_error(std::string("Kernel launch failed: ") +
                              cudaGetErrorString(err));
@@ -284,15 +393,59 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
   std::vector<unsigned int> h_xCoords(config_.batch_keys * 8);
   std::vector<unsigned char> h_yParity(config_.batch_keys);
 
-  cudaEventRecord(d2h_start);
-  err = cudaMemcpy(h_xCoords.data(), d_xCoords,
-                   config_.batch_keys * 8 * sizeof(unsigned int),
-                   cudaMemcpyDeviceToHost);
-  if (err == cudaSuccess) {
-    err = cudaMemcpy(h_yParity.data(), d_yParity,
-                     config_.batch_keys * sizeof(unsigned char),
-                     cudaMemcpyDeviceToHost);
+  std::vector<unsigned int> h_beta_x;
+  std::vector<unsigned int> h_lambda_x;
+  std::vector<unsigned int> h_flags;
+
+  if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+    h_beta_x.resize(config_.batch_keys * 8);
+    h_lambda_x.resize(config_.batch_keys * 8);
+    h_flags.resize(config_.batch_keys);
   }
+
+  std::vector<unsigned int> h_endo_diff_x;
+  std::vector<uint32_t> h_endo_diff_flags;
+  if (config_.experiment == ExperimentType::ENDO_DIFF) {
+    h_endo_diff_x.resize(config_.batch_keys * 8);
+    h_endo_diff_flags.resize(config_.batch_keys);
+  }
+
+  // Differential host buffers will be handled after specific transfer
+
+  cudaEventRecord(d2h_start);
+
+  if (config_.experiment == ExperimentType::ENDO_DIFF) {
+    cudaMemcpy(h_endo_diff_x.data(), d_delta_P_x,
+               config_.batch_keys * 8 * sizeof(unsigned int),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_endo_diff_flags.data(), d_flags,
+               config_.batch_keys * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    err = cudaGetLastError();
+  } else if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+    cudaMemcpy(h_xCoords.data(), d_xCoords,
+               config_.batch_keys * 8 * sizeof(unsigned int),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_beta_x.data(), d_beta_x,
+               config_.batch_keys * 8 * sizeof(unsigned int),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_lambda_x.data(), d_lambda_x,
+               config_.batch_keys * 8 * sizeof(unsigned int),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_flags.data(), d_flags,
+               config_.batch_keys * sizeof(unsigned int),
+               cudaMemcpyDeviceToHost);
+    err = cudaGetLastError();
+  } else {
+    err = cudaMemcpy(h_xCoords.data(), d_xCoords,
+                     config_.batch_keys * 8 * sizeof(unsigned int),
+                     cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess) {
+      err = cudaMemcpy(h_yParity.data(), d_yParity,
+                       config_.batch_keys * sizeof(unsigned char),
+                       cudaMemcpyDeviceToHost);
+    }
+  }
+
   cudaEventRecord(d2h_stop);
   cudaEventSynchronize(d2h_stop);
 
@@ -300,6 +453,16 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
     cudaFree(d_keys);
     cudaFree(d_xCoords);
     cudaFree(d_yParity);
+    if (config_.experiment == ExperimentType::ENDO_DIFF) {
+      cudaFree(d_delta_P_x);
+      cudaFree(d_flags);
+    }
+    if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+      cudaFree(d_beta_x);
+      cudaFree(d_lambda_x);
+      cudaFree(d_flags);
+      cudaFree(d_lambda_keys);
+    }
     freeBasePointTable(d_gxPtr, d_gyPtr);
     throw std::runtime_error("D2H transfer failed");
   }
@@ -307,7 +470,7 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
   float d2h_ms;
   cudaEventElapsedTime(&d2h_ms, d2h_start, d2h_stop);
 
-  // Differential mode: transfer differential results
+  // Differential mode extra transfer
   std::vector<unsigned int> h_delta_P_x;
   std::vector<uint32_t> h_delta_P_x_mod_m1;
   std::vector<uint32_t> h_delta_P_x_mod_m2;
@@ -317,55 +480,35 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
     h_delta_P_x_mod_m1.resize(config_.batch_keys);
     h_delta_P_x_mod_m2.resize(config_.batch_keys);
 
-    cudaEventRecord(d2h_start);
-
+    cudaEventRecord(d2h_start); // Reuse event? fine.
     err = cudaMemcpy(h_delta_P_x.data(), d_delta_P_x,
                      config_.batch_keys * 8 * sizeof(unsigned int),
                      cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      cudaFree(d_keys);
-      cudaFree(d_xCoords);
-      cudaFree(d_yParity);
-      cudaFree(d_delta_P_x);
-      cudaFree(d_delta_P_x_mod_m1);
-      cudaFree(d_delta_P_x_mod_m2);
-      freeBasePointTable(d_gxPtr, d_gyPtr);
-      throw std::runtime_error("D2H transfer failed for delta_P_x");
-    }
-
-    err = cudaMemcpy(h_delta_P_x_mod_m1.data(), d_delta_P_x_mod_m1,
-                     config_.batch_keys * sizeof(uint32_t),
-                     cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      cudaFree(d_keys);
-      cudaFree(d_xCoords);
-      cudaFree(d_yParity);
-      cudaFree(d_delta_P_x);
-      cudaFree(d_delta_P_x_mod_m1);
-      cudaFree(d_delta_P_x_mod_m2);
-      freeBasePointTable(d_gxPtr, d_gyPtr);
-      throw std::runtime_error("D2H transfer failed for mod_m1");
-    }
-
-    err = cudaMemcpy(h_delta_P_x_mod_m2.data(), d_delta_P_x_mod_m2,
-                     config_.batch_keys * sizeof(uint32_t),
-                     cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      cudaFree(d_keys);
-      cudaFree(d_xCoords);
-      cudaFree(d_yParity);
-      cudaFree(d_delta_P_x);
-      cudaFree(d_delta_P_x_mod_m1);
-      cudaFree(d_delta_P_x_mod_m2);
-      freeBasePointTable(d_gxPtr, d_gyPtr);
-      throw std::runtime_error("D2H transfer failed for mod_m2");
-    }
+    if (err == cudaSuccess)
+      err = cudaMemcpy(h_delta_P_x_mod_m1.data(), d_delta_P_x_mod_m1,
+                       config_.batch_keys * sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess)
+      err = cudaMemcpy(h_delta_P_x_mod_m2.data(), d_delta_P_x_mod_m2,
+                       config_.batch_keys * sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost);
 
     cudaEventRecord(d2h_stop);
     cudaEventSynchronize(d2h_stop);
+    if (err != cudaSuccess) {
+      // Cleanup...
+      cudaFree(d_keys);
+      cudaFree(d_xCoords);
+      cudaFree(d_yParity);
+      cudaFree(d_delta_P_x);
+      cudaFree(d_delta_P_x_mod_m1);
+      cudaFree(d_delta_P_x_mod_m2);
+      freeBasePointTable(d_gxPtr, d_gyPtr);
+      throw std::runtime_error("D2H differential transfer failed");
+    }
   }
 
-  // Cleanup device memory
+  // Cleanup Device Memory
   cudaFree(d_keys);
   cudaFree(d_xCoords);
   cudaFree(d_yParity);
@@ -373,6 +516,16 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
     cudaFree(d_delta_P_x);
     cudaFree(d_delta_P_x_mod_m1);
     cudaFree(d_delta_P_x_mod_m2);
+  }
+  if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+    cudaFree(d_beta_x);
+    cudaFree(d_lambda_x);
+    cudaFree(d_flags);
+    cudaFree(d_lambda_keys);
+  }
+  if (config_.experiment == ExperimentType::ENDO_DIFF) {
+    cudaFree(d_delta_P_x);
+    cudaFree(d_flags);
   }
   freeBasePointTable(d_gxPtr, d_gyPtr);
 
@@ -383,40 +536,48 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
   cudaEventDestroy(d2h_start);
   cudaEventDestroy(d2h_stop);
 
-  // Convert GPU output to point records
+  // Convert
   std::vector<PointRecord> records;
   convertGPUOutput(batch_id, h_xCoords, h_yParity, records,
                    config_.sample_rate);
 
-  // Verify if requested (first batch only)
-  if (config_.verify && batch_id == 0) {
+  // Verify
+  if (config_.verify && batch_id == 0 &&
+      config_.experiment != ExperimentType::ENDOMORPHISM &&
+      config_.experiment != ExperimentType::ENDO_DIFF) {
     if (!verifyCPU(keys, records)) {
       throw std::runtime_error("Verification failed!");
     }
   }
 
-  // Write to file (unless dry run)
+  // Write
   if (!config_.dry_run) {
-    // This is inefficient - we should keep the file open across batches
-    // For now, append mode would be better, but let's keep it simple
     static std::unique_ptr<PointFileWriter> point_writer;
     static std::unique_ptr<TelemetryWriter> telem_writer;
+    static std::unique_ptr<EndomorphismFileWriter> endo_writer;
+    static std::unique_ptr<EndoDiffFileWriter> endo_diff_writer;
 
     if (batch_id == 0) {
-      point_writer = std::make_unique<PointFileWriter>(config_.out_bin);
+      if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+        endo_writer = std::make_unique<EndomorphismFileWriter>(config_.out_bin);
+      } else if (config_.experiment == ExperimentType::ENDO_DIFF) {
+        endo_diff_writer =
+            std::make_unique<EndoDiffFileWriter>(config_.out_bin);
+      } else {
+        point_writer = std::make_unique<PointFileWriter>(config_.out_bin);
+      }
       telem_writer = std::make_unique<TelemetryWriter>(config_.telemetry_file);
     }
-    // Write output (baseline or differential mode)
+
     auto batch_end = std::chrono::high_resolution_clock::now();
     double batch_total_ms =
         std::chrono::duration<double, std::milli>(batch_end - batch_start)
             .count();
 
     if (config_.experiment == ExperimentType::DIFFERENTIAL) {
-      // Differential mode: convert and write differential records
+      // Differential Write
       std::vector<DifferentialRecord> diff_records;
       diff_records.reserve(config_.batch_keys);
-
       uint32_t delta = config_.diff_config.delta_set[0];
       uint8_t family_id = static_cast<uint8_t>(config_.family);
       uint8_t param = (config_.family == KeyFamily::MASKED)
@@ -427,8 +588,6 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
 
       for (uint64_t i = 0; i < config_.batch_keys; i++) {
         DifferentialRecord rec;
-
-        // Copy delta_P_x (32 bytes, convert to big-endian byte array)
         for (int j = 0; j < 8; j++) {
           uint32_t word = h_delta_P_x[i * 8 + j];
           rec.delta_P_x[j * 4 + 0] = (word >> 24) & 0xFF;
@@ -436,7 +595,6 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
           rec.delta_P_x[j * 4 + 2] = (word >> 8) & 0xFF;
           rec.delta_P_x[j * 4 + 3] = word & 0xFF;
         }
-
         rec.delta_P_x_mod_m1 = h_delta_P_x_mod_m1[i];
         rec.delta_P_x_mod_m2 = h_delta_P_x_mod_m2[i];
         rec.delta_value = delta;
@@ -445,72 +603,70 @@ void ECDumpDriver::processBatch(uint32_t batch_id) {
         rec.batch_id = batch_id;
         rec.index_in_batch = static_cast<uint32_t>(i);
         memset(rec.reserved, 0, 6);
-
         diff_records.push_back(rec);
       }
+      static DifferentialFileWriter diff_writer(config_.out_bin);
+      diff_writer.writeRecords(diff_records);
 
-      // Write differential records
-      if (!config_.dry_run) {
-        static DifferentialFileWriter diff_writer(config_.out_bin);
-        diff_writer.writeRecords(diff_records);
+      std::cout << "Batch " << batch_id << " (Diff)" << std::endl;
+
+    } else if (config_.experiment == ExperimentType::ENDOMORPHISM) {
+      std::vector<EndomorphismRecord> endo_records;
+      endo_records.reserve(config_.batch_keys);
+      for (uint64_t i = 0; i < config_.batch_keys; i++) {
+        EndomorphismRecord rec;
+        rec.batch_id = batch_id;
+        rec.index_in_batch = static_cast<uint32_t>(i);
+        rec.flags = h_flags[i];
+        for (int j = 0; j < 8; j++) {
+          uint32_t w = h_xCoords[i * 8 + j];
+          rec.x[j * 4 + 0] = (w >> 24) & 0xFF;
+          rec.x[j * 4 + 1] = (w >> 16) & 0xFF;
+          rec.x[j * 4 + 2] = (w >> 8) & 0xFF;
+          rec.x[j * 4 + 3] = w & 0xFF;
+          w = h_beta_x[i * 8 + j];
+          rec.beta_x[j * 4 + 0] = (w >> 24) & 0xFF;
+          rec.beta_x[j * 4 + 1] = (w >> 16) & 0xFF;
+          rec.beta_x[j * 4 + 2] = (w >> 8) & 0xFF;
+          rec.beta_x[j * 4 + 3] = w & 0xFF;
+          w = h_lambda_x[i * 8 + j];
+          rec.lambda_x[j * 4 + 0] = (w >> 24) & 0xFF;
+          rec.lambda_x[j * 4 + 1] = (w >> 16) & 0xFF;
+          rec.lambda_x[j * 4 + 2] = (w >> 8) & 0xFF;
+          rec.lambda_x[j * 4 + 3] = w & 0xFF;
+        }
+        endo_records.push_back(rec);
       }
+      endo_writer->writeRecords(endo_records);
+      std::cout << "Batch " << batch_id << " (Endo)" << std::endl;
 
-      std::cout << "Batch " << batch_id << ": " << config_.batch_keys
-                << " differential records in " << std::fixed
-                << std::setprecision(2) << batch_total_ms << " ms ("
-                << std::setprecision(0)
-                << (config_.batch_keys / (batch_total_ms / 1000.0))
-                << " keys/sec, kernel: " << std::fixed << std::setprecision(2)
-                << kernel_ms << " ms)" << std::endl;
+    } else if (config_.experiment == ExperimentType::ENDO_DIFF) {
+      std::vector<EndoDiffRecord> ed_records;
+      uint32_t delta = config_.diff_config.delta_set.empty()
+                           ? 1
+                           : config_.diff_config.delta_set[0];
+      convertGPUEndoDiffOutput(batch_id, delta, h_endo_diff_x,
+                               h_endo_diff_flags, ed_records);
+      endo_diff_writer->writeRecords(ed_records);
+      std::cout << "Batch " << batch_id << " (EndoDiff)" << std::endl;
     } else {
-      // Baseline mode: convert and write point records
-      // The records vector is already populated by convertGPUOutput above
-      // std::vector<PointRecord> records;
-      // convertGPUOutput(batch_id, h_xCoords, h_yParity, records,
-      //                  config_.sample_rate);
-
-      // Write output
-      if (!config_.dry_run) {
-        static PointFileWriter point_writer(config_.out_bin);
-        point_writer.writePoints(records);
-      }
-
-      std::cout << "Batch " << batch_id << ": " << config_.batch_keys
-                << " keys in " << std::fixed << std::setprecision(2)
-                << batch_total_ms << " ms (" << std::setprecision(0)
-                << (config_.batch_keys / (batch_total_ms / 1000.0))
-                << " keys/sec, kernel: " << std::fixed << std::setprecision(2)
-                << kernel_ms << " ms, sampled: " << records.size() << " points)"
-                << std::endl;
+      point_writer->writePoints(records);
+      std::cout << "Batch " << batch_id << " (Baseline)" << std::endl;
     }
 
-    // Emit telemetry
+    // Telemetry
     BatchTelemetry telem;
     telem.timestamp = static_cast<uint64_t>(std::time(nullptr));
     telem.batch_id = batch_id;
     telem.family = config_.family;
-    telem.start_k =
-        "0x" +
-        key_gen_->getBatchStartKey(batch_id, config_.batch_keys).toString(16);
-    telem.mask_bits = config_.mask_bits;
-    telem.stride = config_.stride;
     telem.num_keys = config_.batch_keys;
     telem.kernel_ms = kernel_ms;
     telem.h2d_ms = h2d_ms;
     telem.d2h_ms = d2h_ms;
     telem.cpu_prep_ms = cpu_prep_ms;
-    telem.cpu_wait_gpu_ms = 0.0; // Not implemented yet
     telem.sampled_points = records.size();
-    telem.matches = 0;
 
-    if (!config_.dry_run) {
-      static std::unique_ptr<TelemetryWriter> telem_writer;
-      if (batch_id == 0) {
-        telem_writer =
-            std::make_unique<TelemetryWriter>(config_.telemetry_file);
-      }
-      telem_writer->writeBatch(telem);
-    }
+    telem_writer->writeBatch(telem);
   }
 }
 

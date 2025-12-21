@@ -73,6 +73,28 @@ cudaError_t launchDifferentialKernel(
     const unsigned int *d_gxPtr, const unsigned int *d_gyPtr, int blocks,
     int threads, cudaEvent_t start, cudaEvent_t stop);
 
+// Launch endomorphism kernel wrapper
+cudaError_t launchEndomorphismKernel(
+    const unsigned int *d_keys, const unsigned int *d_lambda_keys,
+    unsigned int *d_x, unsigned int *d_beta_x, unsigned int *d_lambda_x,
+    unsigned int *d_flags, const unsigned int *d_gx, const unsigned int *d_gy,
+    int numKeys, int blocks, int threads, cudaEvent_t start, cudaEvent_t stop);
+
+// Endomorphism Differential Kernel Declaration
+#ifdef __CUDACC__
+__global__ void computeEndoDiffKernel(const unsigned int *keys,  // k
+                                      uint32_t delta_value,      // delta
+                                      unsigned int *delta_phi_x, // Output Δφ.x
+                                      uint32_t *flags_out,       // Output flags
+                                      const unsigned int *gxPtr,
+                                      const unsigned int *gyPtr, int num_keys);
+#endif
+
+cudaError_t launchEndoDiffKernel(
+    const unsigned int *d_keys, uint32_t delta, unsigned int *d_delta_phi_x,
+    unsigned int *d_flags, const unsigned int *d_gx, const unsigned int *d_gy,
+    int numKeys, int blocks, int threads, cudaEvent_t start, cudaEvent_t stop);
+
 } // namespace ecdump
 
 #endif // _EC_DUMP_CUH

@@ -271,4 +271,149 @@ void convertGPUOutput(
   }
 }
 
+void convertGPUEndoDiffOutput(uint32_t batch_id, uint32_t delta_value,
+                              const std::vector<unsigned int>
+                                  &delta_phi_x, // 8 words per point, big-endian
+                              const std::vector<uint32_t> &flags,
+                              std::vector<EndoDiffRecord> &records_out) {
+
+  size_t numPoints = flags.size();
+  records_out.clear();
+  records_out.reserve(numPoints);
+
+  for (size_t i = 0; i < numPoints; i++) {
+    EndoDiffRecord record;
+    record.delta_value = delta_value;
+    record.batch_id = batch_id;
+    record.index_in_batch = static_cast<uint32_t>(i);
+    record.flags = flags[i];
+
+    // Copy delta_phi_x (big-endian from GPU)
+    for (int j = 0; j < 8; j++) {
+      uint32_t word = delta_phi_x[i * 8 + j];
+      record.delta_phi_x[j * 4 + 0] = static_cast<uint8_t>((word >> 24) & 0xFF);
+      record.delta_phi_x[j * 4 + 1] = static_cast<uint8_t>((word >> 16) & 0xFF);
+      record.delta_phi_x[j * 4 + 2] = static_cast<uint8_t>((word >> 8) & 0xFF);
+      record.delta_phi_x[j * 4 + 3] = static_cast<uint8_t>(word & 0xFF);
+    }
+
+    // Zero out reserved
+    for (int k = 0; k < 12; k++)
+      record.reserved[k] = 0;
+
+    records_out.push_back(record);
+  }
+}
+
+// ============================================================================
+// EndomorphismFileWriter Implementation
+// ============================================================================
+
+class EndomorphismFileWriter::Impl {
+public:
+  Impl(const std::string &filename) {
+    file_.open(filename, std::ios::binary | std::ios::out);
+    if (!file_.is_open()) {
+      throw std::runtime_error("Failed to open endomorphism output file: " +
+                               filename);
+    }
+  }
+
+  ~Impl() {
+    if (file_.is_open()) {
+      file_.close();
+    }
+  }
+
+  void writeRecord(const EndomorphismRecord &record) {
+    // Write 108-byte record in binary format
+    file_.write(reinterpret_cast<const char *>(&record.batch_id), 4);
+    file_.write(reinterpret_cast<const char *>(&record.index_in_batch), 4);
+    file_.write(reinterpret_cast<const char *>(record.x), 32);
+    file_.write(reinterpret_cast<const char *>(record.beta_x), 32);
+    file_.write(reinterpret_cast<const char *>(record.lambda_x), 32);
+    file_.write(reinterpret_cast<const char *>(&record.flags), 4);
+  }
+
+  void writeRecords(const std::vector<EndomorphismRecord> &records) {
+    for (const auto &record : records) {
+      writeRecord(record);
+    }
+    file_.flush();
+  }
+
+  void flush() { file_.flush(); }
+
+private:
+  std::ofstream file_;
+};
+
+// EndomorphismFileWriter public interface
+EndomorphismFileWriter::EndomorphismFileWriter(const std::string &filename)
+    : impl_(std::make_unique<Impl>(filename)) {}
+
+EndomorphismFileWriter::~EndomorphismFileWriter() = default;
+
+void EndomorphismFileWriter::writeRecords(
+    const std::vector<EndomorphismRecord> &records) {
+  impl_->writeRecords(records);
+}
+
+void EndomorphismFileWriter::flush() { impl_->flush(); }
+
+// ============================================================================
+// EndoDiffFileWriter Implementation
+// ============================================================================
+
+class EndoDiffFileWriter::Impl {
+public:
+  Impl(const std::string &filename) {
+    file_.open(filename, std::ios::binary | std::ios::out);
+    if (!file_.is_open()) {
+      throw std::runtime_error("Failed to open endo diff output file: " +
+                               filename);
+    }
+  }
+
+  ~Impl() {
+    if (file_.is_open()) {
+      file_.close();
+    }
+  }
+
+  void writeRecord(const EndoDiffRecord &record) {
+    // Write 60-byte record
+    file_.write(reinterpret_cast<const char *>(record.delta_phi_x), 32);
+    file_.write(reinterpret_cast<const char *>(&record.delta_value), 4);
+    file_.write(reinterpret_cast<const char *>(&record.batch_id), 4);
+    file_.write(reinterpret_cast<const char *>(&record.index_in_batch), 4);
+    file_.write(reinterpret_cast<const char *>(&record.flags), 4);
+    file_.write(reinterpret_cast<const char *>(record.reserved), 12);
+  }
+
+  void writeRecords(const std::vector<EndoDiffRecord> &records) {
+    for (const auto &record : records) {
+      writeRecord(record);
+    }
+    file_.flush();
+  }
+
+  void flush() { file_.flush(); }
+
+private:
+  std::ofstream file_;
+};
+
+EndoDiffFileWriter::EndoDiffFileWriter(const std::string &filename)
+    : impl_(std::make_unique<Impl>(filename)) {}
+
+EndoDiffFileWriter::~EndoDiffFileWriter() = default;
+
+void EndoDiffFileWriter::writeRecords(
+    const std::vector<EndoDiffRecord> &records) {
+  impl_->writeRecords(records);
+}
+
+void EndoDiffFileWriter::flush() { impl_->flush(); }
+
 } // namespace ecdump

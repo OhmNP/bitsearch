@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "timestamp": 1766338518,
+  "family": "consecutive",
+  "start_k": "0x1",
+  "batch_keys": 1024,
+  "batches": 1,
+  "total_keys": 1024,
+  "sample_rate": 1,
+  "seed": 0,
+  "device": 0,
+  "output_file": "test_endo.bin",
+  "telemetry_file": "test_endo.json"
+}

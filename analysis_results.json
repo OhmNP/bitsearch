@@ -1,0 +1,61 @@
+{
+  "num_records": 1024,
+  "tests": {
+    "correctness": {
+      "test": "correctness_match_rate",
+      "match_rate": 1.0,
+      "failures": 0,
+      "pass": true
+    },
+    "chi_square": {
+      "test": "chi_square_uniformity",
+      "statistic": 296.5,
+      "p_value": 0.03789806859676603,
+      "dof": 255,
+      "pass": true,
+      "expected_mean": 4.0,
+      "observed_range": [
+        0,
+        10
+      ]
+    },
+    "collision_rate": {
+      "test": "collision_rate",
+      "observed_rate": 0.0,
+      "expected_rate": 0.0,
+      "unique_values": 1024,
+      "total_values": 1024,
+      "collisions": 0,
+      "p_value": 1.0,
+      "pass": true
+    },
+    "serial_correlation": {
+      "test": "serial_correlation",
+      "lag_1_correlation": -0.018086465359887203,
+      "max_correlation": 0.062205943184494246,
+      "correlations": [
+        -0.018086465359887203,
+        -0.062205943184494246,
+        0.02450449204703976,
+        0.03293628798774248,
+        -0.030926133891591476,
+        -0.02011329260711785,
+        -0.03676057860848389,
+        0.038152850705421786,
+        0.03248828525085686,
+        -0.029037346396917012
+      ],
+      "threshold": 0.1,
+      "pass": true
+    },
+    "differential_bias": {
+      "test": "differential_bias",
+      "max_bias": 0.0361328125,
+      "mean_bias": 0.0126190185546875,
+      "biased_bits": [],
+      "num_biased_bits": 0,
+      "pass": true
+    }
+  },
+  "overall_pass": true
+}

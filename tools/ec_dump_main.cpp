@@ -174,6 +174,10 @@ int main(int argc, char **argv) {
         std::string exp_type = argv[++i];
         if (exp_type == "diff" || exp_type == "differential") {
           config.experiment = ecdump::ExperimentType::DIFFERENTIAL;
+        } else if (exp_type == "endo" || exp_type == "endomorphism") {
+          config.experiment = ecdump::ExperimentType::ENDOMORPHISM;
+        } else if (exp_type == "endo_diff" || exp_type == "structure") {
+          config.experiment = ecdump::ExperimentType::ENDO_DIFF;
         } else {
           std::cerr << "Error: Unknown experiment type: " << exp_type
                     << std::endl;

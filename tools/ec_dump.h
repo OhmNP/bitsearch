@@ -92,6 +92,32 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
+// Endomorphism experiment file writer
+class EndomorphismFileWriter {
+public:
+  explicit EndomorphismFileWriter(const std::string &filename);
+  ~EndomorphismFileWriter();
+  void writeRecords(const std::vector<EndomorphismRecord> &records);
+  void flush();
+
+private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+// Endomorphism Differential experiment file writer
+class EndoDiffFileWriter {
+public:
+  explicit EndoDiffFileWriter(const std::string &filename);
+  ~EndoDiffFileWriter();
+  void writeRecords(const std::vector<EndoDiffRecord> &records);
+  void flush();
+
+private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 // I/O helper functions
 // I/O helper functions
 void writeManifest(const ECDumpConfig &config, uint64_t total_keys);
@@ -99,7 +125,13 @@ void convertGPUOutput(uint32_t batch_id,
                       const std::vector<unsigned int> &xCoords,
                       const std::vector<unsigned char> &yParity,
                       std::vector<PointRecord> &records_out,
+
                       double sample_rate);
+
+void convertGPUEndoDiffOutput(uint32_t batch_id, uint32_t delta_value,
+                              const std::vector<unsigned int> &delta_phi_x,
+                              const std::vector<uint32_t> &flags,
+                              std::vector<EndoDiffRecord> &records_out);
 
 // Hard Correctness Gate
 void perform_hard_correctness_gate();
